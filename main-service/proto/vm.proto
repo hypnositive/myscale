@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package vm;
+
+option go_package = "main-service/proto;vm";
+
+service VMService {
+
+    rpc ListVMs (ListVMsRequest) returns (ListVMsResponse);
+
+    rpc StartVM (VMActionRequest) returns (VMActionResponse);
+
+    rpc StopVM (VMActionRequest) returns (VMActionResponse);
+
+    rpc ShutdownVM (VMActionRequest) returns (VMActionResponse);
+
+}
+
+message VM {
+    int32 id = 1;
+    int32 node_id = 2;
+    int32 proxmox_vmid = 3;
+    string name = 4;
+    string status = 5;
+    string node_name = 6;
+}
+
+message ListVMsRequest {
+}
+
+message ListVMsResponse {
+    repeated VM vms = 1;
+}
+
+message VMActionRequest {
+    int32 vm_id = 1;
+}
+
+message VMActionResponse {
+    bool success = 1;
+    string message = 2;
+    string task_upid = 3;
+}
