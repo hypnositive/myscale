@@ -1,124 +1,91 @@
 package main
 
 import (
-	"context"
 	"database/sql"
-	"fmt"
 	"log"
-	"time"
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
 
-	"main-service/internal/model"
+	"main-service/internal/config"
 	"main-service/internal/proxmox"
 	"main-service/internal/repository"
+	"main-service/internal/service"
+	pb "main-service/proto"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
-const (
-	dbDSN        = "postgres://postgres:secret@localhost:5432/mydatabase?sslmode=disable"
-	proxmoxHost  = "https://100.79.192.82:8006"
-	proxmoxNode  = "pve01"
-	proxmoxToken = "root@pam!gobackend=27385536-8742-42a8-9754-b98f10a27d59"
-	proxmoxName  = "primary-pve"
-)
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
-	db, err := sql.Open("pgx", dbDSN)
+	cfg := config.Load()
+	log.Println("Yapılandırma yüklendi")
+
+
+	//db
+	db, err := sql.Open("pgx", cfg.DBDSN)
 	if err != nil {
-		log.Fatalf("DB bağlantısı açılamadı: %v", err)
+		log.Fatalf("Veritabanı bağlantı hatası: %v", err)
 	}
 	defer db.Close()
 
-	if err := db.PingContext(ctx); err != nil {
-		log.Fatalf("DB ping hatası: %v", err)
+	if err := db.Ping(); err != nil {
+		log.Fatalf("Veritabanına ulaşılamıyor: %v", err)
 	}
-	fmt.Println("[+] PostgreSQL bağlantısı başarılı.")
+	log.Println("Veritabanı bağlantısı başarılı.")
 
+
+	//repository katmanları
 	nodeRepo := repository.NewNodeRepository(db)
-	vmRepo := repository.NewVMRepository(db)
-
 	if err := nodeRepo.InitSchema(); err != nil {
-		log.Fatalf("Node tablosu oluşturulamadı: %v", err)
-	}
-	if err := vmRepo.InitSchema(); err != nil {
-		log.Fatalf("VM tablosu oluşturulamadı: %v", err)
-	}
-	fmt.Println("[+] Schema hazır.")
-
-	node := model.Node{
-		Name:     proxmoxName,
-		HostURL:  proxmoxHost,
-		NodeName: proxmoxNode,
-		Token:    proxmoxToken,
-		IsActive: false,
+		log.Fatalf("Nodes tablosu oluşturulamadı: %v", err)
 	}
 
-	if err := nodeRepo.Upsert(node); err != nil {
-		log.Fatalf("Node kaydı yazılamadı: %v", err)
+	vmRepo := repository.NewVMRepository(db)
+		if err := vmRepo.InitSchema(); err != nil {
+		log.Fatalf("Vms tablosu oluşturulamadı: %v", err)
 	}
-	fmt.Println("[+] Node kaydı yazıldı (başlangıç: inactive).")
+	log.Println("Veritabanı şemaları (nodes, vms) hazır.")
 
-	client := proxmox.NewClient(node.HostURL, node.NodeName, node.Token)
-	vms, err := client.ListVMs(ctx)
+
+	//proxmox havuzu
+	clientPool := proxmox.NewClientPool()
+	vmService := service.NewVMService(vmRepo,nodeRepo,clientPool) 
+
+
+	//tcp listener
+	lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
 	if err != nil {
-		node.IsActive = false
-		if upsertErr := nodeRepo.Upsert(node); upsertErr != nil {
-			log.Fatalf("Node inactive güncellemesi de başarısız: %v (asıl hata: %v)", upsertErr, err)
-		}
-		log.Fatalf("Proxmox VM listesi çekilemedi: %v", err)
+		log.Fatalf("Port dinlenemiyor (%s): %v",cfg.GRPCPort, err)
 	}
 
-	node.IsActive = true
-	if err := nodeRepo.Upsert(node); err != nil {
-		log.Fatalf("Node active güncellenemedi: %v", err)
-	}
-	if err := nodeRepo.DeactivateOtherNodes(node.NodeName, node.HostURL); err != nil {
-		log.Fatalf("Aynı node_name için eski host kayıtları pasifleştirilemedi: %v", err)
+	//grpc sunucusu
+	grpcServer := grpc.NewServer()
+	pb.RegisterVMServiceServer(grpcServer, vmService)
+
+
+	//postman veya grpcurl ile kolay test edebilmek için reflectionmış ne olduğu hakkında en ufak bir fikrimd ahi yok
+	reflection.Register(grpcServer)
+
+	//graceful shutdown
+	go func ()  {
+		stopChan := make(chan os.Signal, 1)
+		signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+		<-stopChan
+
+		log.Println("sunucu kapatılıyor...")
+		grpcServer.GracefulStop()
+		log.Println("Sunucu tereyağından kıl çekermişcesine durdurulmuş öğren burayı aq")
+	}()
+	
+	log.Printf("gRPC Sunucusu :%s portunda dinlemede...\n", cfg.GRPCPort)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("gRPC sunucu hatası: %v", err)
 	}
 
-	storedNode, err := nodeRepo.GetNodeByHostURL(node.HostURL)
-	if err != nil {
-		log.Fatalf("Node kaydı host_url ile çekilemedi: %v", err)
-	}
-	if storedNode == nil {
-		log.Fatalf("Node kaydı bulunamadı: host=%s", node.HostURL)
-	}
 
-	fmt.Printf("[+] Proxmox'tan %d VM listelendi.\n", len(vms))
-
-	var upsertErrCount int
-	for _, vm := range vms {
-		if err := vmRepo.Upsert(model.StoredVM{
-			NodeID:      storedNode.ID,
-			ProxmoxVMID: vm.VMID,
-			Name:        vm.Name,
-			Status:      vm.Status,
-			NodeName:    storedNode.NodeName,
-		}); err != nil {
-			upsertErrCount++
-			log.Printf("VM upsert hatası (vmid=%d): %v", vm.VMID, err)
-		}
-	}
-	fmt.Printf("[+] VM kayıtları DB'ye işlendi. başarılı=%d, hatalı=%d\n", len(vms)-upsertErrCount, upsertErrCount)
-
-	allVMs, err := vmRepo.GetAll()
-	if err != nil {
-		log.Fatalf("DB'den VM'ler çekilemedi: %v", err)
-	}
-
-	fmt.Println("\n--- DB'deki VM'ler ---")
-	for _, vm := range allVMs {
-		fmt.Printf("ID=%d | Node=%s | ProxmoxVMID=%d | Name=%s | Status=%s\n",
-			vm.ID, vm.NodeName, vm.ProxmoxVMID, vm.Name, vm.Status)
-	}
-	fmt.Println("----------------------")
-
-	if len(vms) == 0 {
-		fmt.Println("[!] Proxmox'tan hiç VM dönmedi. Node/token bilgilerini kontrol et.")
-		return
-	}
-	fmt.Printf("[+] Proxmox'tan ilk VM örneği: %s (vmid=%d, status=%s)\n", vms[0].Name, vms[0].VMID, vms[0].Status)
 }
