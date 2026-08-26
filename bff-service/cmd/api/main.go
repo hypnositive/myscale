@@ -39,7 +39,9 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.GET("/vms",vmHandler.ListVMs)
-		api.POST("/vms/:id/start", vmHandler.VMAction)
+		api.POST("/vms/:id/start", vmHandler.StartVM)
+		api.POST("/vms/:id/stop", vmHandler.StopVM)
+		api.POST("/vms/:id/shutdown", vmHandler.ShutdownVM)
 	}
 
 	log.Println("🚀 BFF Servisi 8080 portunda dinliyor: http://localhost:8080")

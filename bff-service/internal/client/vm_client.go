@@ -39,8 +39,20 @@ func (c *VMClient) ListVMs(ctx context.Context) (*pb.ListVMsResponse, error) {
 	return c.client.ListVMs(ctxTimeout, &pb.ListVMsRequest{})
 }
 
-func (c *VMClient) VMAction(ctx context.Context, vmID int32) (*pb.VMActionResponse, error) {
+func (c *VMClient) StartVM(ctx context.Context, vmID int32) (*pb.VMActionResponse, error) {
 	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return c.client.StartVM(ctxTimeout, &pb.VMActionRequest{VmId: vmID})
+}
+
+func (c *VMClient) StopVM(ctx context.Context, vmID int32) (*pb.VMActionResponse, error) {
+	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return c.client.StopVM(ctxTimeout, &pb.VMActionRequest{VmId: vmID})
+}
+
+func (c *VMClient) ShutdownVM(ctx context.Context, vmID int32) (*pb.VMActionResponse, error) {
+	ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return c.client.ShutdownVM(ctxTimeout, &pb.VMActionRequest{VmId: vmID})
 }
